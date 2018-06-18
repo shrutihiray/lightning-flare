@@ -20,20 +20,31 @@ type NodeAddress = Word64
 type AddressDistance = Word64
 type NumBeacons = Int
 type AddressDatabase = [NodeAddress]
-type Beacon = Nodes
+type Beacon = Node
+type ProcessedNodes = [Node]
+type InitialBeacons = [Beacon]
+type FinalBeacons = [Beacon]
+type InitialBeaconRoutes = [BeaconRoute]
+type FinalBeaconRoutes = [BeaconRoute]
 type SourceAddress = NodeAddress
 type NodeIndex = Int
-type Nodes = (NodeAddress,NodeIndex)
+type Degree = Int
+--type Nodes = (NodeAddress,NodeIndex,Degree,[Nodes])
+type Node = (NodeAddress,NodeIndex)
 type NodeDegree =  (NodeAddress,Int)
+type DegreeTable = [NodeDegree]
 type SourceIndex = NodeIndex
-type SourceNode = Nodes
+type SourceNode = Node
 type SourceDegree = NodeDegree
 type ScanRadius = Int
-type NodeNeighbours = [Nodes]
+type NodeNeighbours = [Node]
 type SourceNeighbours = NodeNeighbours
-type NeighbourTable = [(Nodes,NodeNeighbours)]
-type PaymentChannel = (Nodes,Nodes)
+type NeighbourTable = [(Node,NodeNeighbours)]
+type PaymentChannel = (Node,Node)
 type RoutingTable = [PaymentChannel]
+type Route = [Node]
+type BeaconRoute = (Beacon,Route)
+type NodeRoute = (Node,Route)
 -- Watts-Strogatz graph generation parameters
 numVertices = 1000
 numRingNeighbors = 20
@@ -63,13 +74,6 @@ removeDuplicates = rdHelper []
 
 sortTuple :: (Ord a) => (a, a) -> (a, a)
 sortTuple (a, b) = (min a b, max a b)  
-
---findBeacons' :: AddressDatabase -> NumBeacons -> SourceAddress -> [Beacon]
---findBeacons' addrDb nB src = (take nB . drop 1) sortedTable -- The drop 1 removes the source node
----  where distTable = zip addrDb $ map (xor src) addrDb -- Calculate (address, distance) list
---        sortedTable = map fst $ sortBy (comparing snd) distTable -- Sort above list by distance
-
-
   
 -- Get payment channels of source 
 getSrcRoutingTable :: SourceNode -> SourceDegree -> SourceNeighbours -> RoutingTable
@@ -78,13 +82,13 @@ getSrcRoutingTable srcNode srcDegree srcNeighborList = map sortTuple routingTabl
         srcList = replicate (snd srcDegree) srcNode
 
 --Get payment channels of neighbors of source 
-getNeighborRoutingTable :: ScanRadius -> SourceNeighbours -> [NodeDegree] -> NeighbourTable -> RoutingTable
+getNeighborRoutingTable :: ScanRadius -> SourceNeighbours -> DegreeTable -> NeighbourTable -> RoutingTable
 getNeighborRoutingTable 1 _ _ _ = []
 getNeighborRoutingTable _ [] _ _ = []
 getNeighborRoutingTable scanRadius (x:xs) degreeTable neighborTable = (formRoutingTable (scanRadius-1) x degreeTable neighborTable) ++ (getNeighborRoutingTable scanRadius xs degreeTable neighborTable)
 
 
-formRoutingTable :: ScanRadius -> SourceNode -> [NodeDegree] -> NeighbourTable -> RoutingTable --add beacons
+formRoutingTable :: ScanRadius -> SourceNode -> DegreeTable -> NeighbourTable -> RoutingTable --add beacons
 formRoutingTable scanRadius srcNode degreeTable neighborTable = routingTableFinal
   where srcIndex = snd srcNode
         srcDegree = (degreeTable !! srcIndex)
@@ -93,46 +97,50 @@ formRoutingTable scanRadius srcNode degreeTable neighborTable = routingTableFina
         routingTable1 = routingTable ++ (getNeighborRoutingTable scanRadius srcNeighborList degreeTable neighborTable)
         routingTableFinal = removeDuplicates routingTable1
 
-compareBeacon :: Nodes -> [Beacon] -> [Beacon] -> NumBeacons -> SourceNode -> [Beacon]
+compareBeacon :: NodeRoute -> ProcessedNodes -> InitialBeaconRoutes-> NumBeacons -> SourceNode -> FinalBeaconRoutes
 compareBeacon nA processed beacons nB src 
-      | nA `elem` processed = beacons
+      | (fst nA) `elem` processed = beacons
       | otherwise = (computeBeacon nA beacons nB src)
 
-computeBeacon :: Nodes -> [Beacon] -> NumBeacons -> SourceNode -> [Beacon]
+computeBeacon :: NodeRoute -> InitialBeaconRoutes -> NumBeacons -> SourceNode -> FinalBeaconRoutes
 computeBeacon nA beacons nB src = take nB sortedTable
   where distTable = zip beacons' $ map (xor srcAddress) beaconAddress-- Calculate (address, distance) list
-        beaconAddress = map (fst) beacons'
+        beaconAddress = map fst (map (fst) beacons')        
         srcAddress = fst src
         beacons' = beacons ++ [nA]
-        sortedTable = map fst $ sortBy (comparing snd) distTable -- Sort above list by distance
-        
+        sortedTable = map fst $ sortBy (comparing snd) distTable -- Sort above list by distance        
 
-findSrcBeacons :: RoutingTable -> [Beacon] -> [Beacon] -> NumBeacons -> SourceNode -> [Beacon] 
-findSrcBeacons [] _ beacons _ _ = beacons
-findSrcBeacons routingTable processed beacons nB src =  beaconsFinal
-  where paymentChannelAddress1 =  (fst (head routingTable))  
-        paymentChannelAddress2 =  (snd (head routingTable))
-        beacons1 = compareBeacon paymentChannelAddress1 processed beacons nB src        
-        beacons2 = compareBeacon paymentChannelAddress2 processed beacons1 nB src
-        processed1 = processed ++ [paymentChannelAddress1] ++ [paymentChannelAddress2]
+findSrcBeacons :: RoutingTable -> NodeRoute -> ProcessedNodes -> InitialBeaconRoutes -> NumBeacons -> SourceNode -> FinalBeaconRoutes 
+findSrcBeacons [] _ _ beacons _ _ = beacons
+findSrcBeacons routingTable nRoute processed beacons nB src =  beaconsFinal
+  where paymentChannelNode1 =  (fst (head routingTable))  
+        paymentChannelNode2 =  (snd (head routingTable))
+        route = snd nRoute
+        route1 = route ++ [paymentChannelNode1]
+        route2 = route ++ [paymentChannelNode2] 
+        beacons1 = compareBeacon (paymentChannelNode1,route1) processed beacons nB src        
+        beacons2 = compareBeacon (paymentChannelNode2,route2) processed beacons1 nB src
+        processed1 = processed ++ [paymentChannelNode1] ++ [paymentChannelNode2]
         processedNew =removeDuplicates processed1
         routingTableNew = drop 1 routingTable
-        beaconsFinal = findSrcBeacons routingTableNew processedNew beacons2 nB src 
+        beaconsFinal = findSrcBeacons routingTableNew nRoute processedNew beacons2 nB src 
 
-findNeighborBeacons :: [Beacon] -> [Beacon] -> [Beacon] -> [NodeDegree] -> NeighbourTable -> NumBeacons -> SourceNode-> [Beacon] -- add routing table neighbor
-findNeighborBeacons [] _ beacons _ _ _ _= beacons
-findNeighborBeacons (x:xs) processed beacons degreeTable neighborTable nB src = findSrcBeacons routingTable processed1 beacons1 nB src
-  where routingTable = formRoutingTable scanRadius x degreeTable neighborTable 
-        beacons1 = findNeighborBeacons xs processed beacons degreeTable neighborTable nB src 
-        processed1 = beacons1 ++ processed
+findNeighborBeacons :: [BeaconRoute] -> NodeRoute -> ProcessedNodes -> InitialBeaconRoutes -> DegreeTable -> NeighbourTable -> NumBeacons -> SourceNode-> FinalBeaconRoutes -- add routing table neighbor
+findNeighborBeacons [] _ _ beacons _ _ _ _= beacons
+findNeighborBeacons (x:xs) nRoute processed beacons degreeTable neighborTable nB src = findSrcBeacons routingTable x processed1 beacons1 nB src
+  where routingTable = formRoutingTable scanRadius beaconNode degreeTable neighborTable 
+        beaconNode = fst x
+        beacons1 = findNeighborBeacons xs nRoute processed beacons degreeTable neighborTable nB src 
+        processed1 = processed ++ (map (fst) beacons1)
 
 
-findBeacons :: RoutingTable -> [Beacon]-> [Beacon] -> [NodeDegree] -> NeighbourTable -> NumBeacons -> SourceNode -> [Beacon]-- add step
+findBeacons :: RoutingTable -> ProcessedNodes -> InitialBeaconRoutes -> DegreeTable -> NeighbourTable -> NumBeacons -> SourceNode -> FinalBeaconRoutes -- add step
 findBeacons routingTable processed beacons degreeTable neighborTable nB src = beaconsFinal
-  where beacons1 = findSrcBeacons routingTable processed beacons nB src
+  where beacons1 = findSrcBeacons routingTable (src,srcRoute) processed beacons nB src
+        srcRoute = [src]
         newBeacons = filter (`notElem` beacons) beacons1         
-        processedNew = processed ++ beacons
-        beaconsFinal = findNeighborBeacons newBeacons  processedNew beacons1 degreeTable neighborTable nB src
+        processedNew = processed ++ (map (fst) beacons)
+        beaconsFinal = findNeighborBeacons newBeacons (src,srcRoute) processedNew beacons1 degreeTable neighborTable nB src
 
 main :: IO ()
 main = do
@@ -169,14 +177,18 @@ main = do
   let neighborTable2 = zip nodeTable1 neighborTable1
 
 
-  let node1 = nodeTable1 !! 1
+  let node1 = nodeTable1 !! 14
   let node2 = nodeTable1 !! 12
-
+  --let neighbor1 = neighbors g (nodeTable !! 2)
 
   --print "Routing Table for Source Node 2" -- A tuple indicates a payment channel
   let routingTableFinal = formRoutingTable scanRadius source degreeTable1 neighborTable2
   let beacons = findBeacons routingTableFinal [source] [] degreeTable1 neighborTable2 numBeacons source
-  --let beacon2 = compareBeacon node1 [source] [node2] 2 source
-  --let beacon3 = computeBeacon node1 [node2] 2 source
+  let route1 = [source,node1]
+  let route2 = [source,node2]
+  let beaconroute2 = (node2,route2)
+  let beaconroute1= (node1,route1)
+  --let beacon2 = compareBeacon' (node1,route1) [source] [beaconroute2] 2 source
+  --let beacon3 = computeBeacon' beaconroute1 [beaconroute2] 2 source
   --print $ head routingTableFinal
   print beacons
