@@ -6,7 +6,7 @@ import           Control.Monad (replicateM)
 import qualified Data.Vector.Unboxed as DV
 import qualified Data.Map.Strict as Map
 import           Data.Word(Word64)
-import           Data.List (sortBy, elemIndex, findIndex, length)
+import           Data.List (sortBy, elemIndex, findIndex, length, nub)
 import           Data.Tuple (swap)
 import           Data.Ord (comparing)
 import           Data.Bits (xor)
@@ -66,11 +66,12 @@ numVertices = 2000
 numRingNeighbors = 4
 probRewiring = 0.3 :: Double
 seedForRNG = 212
-numBeacons = 2:: NumBeacons
+numBeacons = 2 :: NumBeacons
 numCandidateRoutes = 10 :: NumPaths
 numQueriedNodes = 10 :: NumQueriedNodes
 scanRadius = 2 :: ScanRadius
 --maxLength = numVertices
+
 genAddress :: GenIO -> IO NodeAddress
 genAddress = uniform
 
@@ -84,25 +85,12 @@ if' :: Bool -> a -> a -> a
 if' True  x _ = x
 if' False _ y = y
 
-removeDuplicates :: Eq a => [a] -> [a]
-removeDuplicates = rdHelper []
-    where rdHelper seen [] = seen
-          rdHelper seen (x:xs)
-              | x `elem` seen = rdHelper seen xs
-              | otherwise = rdHelper (seen ++ [x]) xs
-
 removeDuplicatesTuples :: ParentNode -> RoutingTable -> RoutingTable
-removeDuplicatesTuples prntNode [] = []        -- for source node 2, (2,0) should be there and not (0,2)
-removeDuplicatesTuples prntNode (x:xs) 
-      | (snd x) == prntNode = removeDuplicatesTuples prntNode xs
-      | otherwise = [x] ++ (removeDuplicatesTuples prntNode xs)
- 
+removeDuplicatesTuples prntNode = filter (\(_, x) -> x /= prntNode)
 
 removeSelfLoops :: RoutingTable -> RoutingTable
-removeSelfLoops [] = []
-removeSelfLoops (x:xs)
-      | (fst x) == (snd x) = removeSelfLoops xs
-      | otherwise = [x] ++ (removeSelfLoops xs) 
+removeSelfLoops = filter (\(x,y) -> x /= y)
+
 -- Get payment channels of source 
 getSrcRoutingTable :: SourceNode -> ParentNode -> SourceDegree -> SourceNeighbours -> RoutingTable
 getSrcRoutingTable srcNode prntNode srcDegree srcNeighborList = routingTableFinal   --map sortTuple routingTable
@@ -124,7 +112,7 @@ formRoutingTable scanRadius prntNode srcNode degreeTable neighborTable = routing
         srcNeighborList = snd (neighborTable !! srcIndex)
         routingTable = getSrcRoutingTable srcNode prntNode srcDegree srcNeighborList
         routingTable1 = routingTable ++ (getNeighborRoutingTable scanRadius srcNode srcNeighborList degreeTable neighborTable)
-        routingTable2 = removeDuplicates routingTable1
+        routingTable2 = nub routingTable1
         routingTableFinal = removeSelfLoops routingTable2
 
 compareBeacon :: NodeRoute -> ProcessedNodes -> InitialBeaconRoutes-> NumBeacons -> SourceNode -> (FinalBeaconRoutes,ProcessedNodes)
@@ -134,7 +122,7 @@ compareBeacon nA processed beacons nB src
 
 computeBeacon :: NodeRoute -> ProcessedNodes -> InitialBeaconRoutes -> NumBeacons -> SourceNode -> (FinalBeaconRoutes,ProcessedNodes)
 computeBeacon nA processed beacons nB src = (finalBeaconRoutes,processedFinal)
-  where distTable = zip beacons' $ map (xor srcAddress) beaconAddress-- Calculate (address, distance) list
+  where distTable = zip beacons' $ map (dist srcAddress) beaconAddress-- Calculate (address, distance) list
         beaconAddress = map fst (map (fst) beacons')        
         srcAddress = fst src
         beacons' = beacons ++ [nA]
@@ -151,13 +139,13 @@ findSrcBeacons routingTable nRoute processed beacons nB src =  finalParameters
         paymentChannelNode2 =  (snd (head routingTable))
         route = snd nRoute
         route1 = route ++ [paymentChannelNode1]
-        route1' = removeDuplicates route1
+        route1' = nub route1
         route2 = route ++ [paymentChannelNode1] ++ [paymentChannelNode2] 
-        route2' = removeDuplicates route2
+        route2' = nub route2
         (beacons1,processed1) = compareBeacon (paymentChannelNode1,route1') processed beacons nB src        
         (beacons2,processed2) = compareBeacon (paymentChannelNode2,route2') processed1 beacons1 nB src
         processed3 = processed2 ++ [paymentChannelNode1] ++ [paymentChannelNode2]
-        processedNew =removeDuplicates processed3
+        processedNew = nub processed3
         routingTableNew = drop 1 routingTable
         finalParameters = findSrcBeacons routingTableNew nRoute processedNew beacons2 nB src 
 
@@ -205,7 +193,7 @@ formRoute numPaths processed combRT srcNode destNode = finalPaths -- stop at sho
         allPaths = [  map ( ++ (tail x) ) (formRoute numPaths processedNew candidateRT srcNode (head x)) | x <- candidatePaths2]
         allPathsConcat = concat allPaths
         allPaths1 =  (candidatePaths1 ++ allPathsConcat)
-        allPaths2 = removeDuplicates allPaths1
+        allPaths2 = nub allPaths1
         allPaths3 = take numPaths (sortBy (comparing length) allPaths2)
 
 modifyRT :: RoutingTable -> RoutingTable -- to have destination as second in tuple
@@ -218,8 +206,8 @@ findClosest srcNode srcRT srcBR destNode = srcClosestNodes
         nodesRT = [[fst (x)] ++ [snd (x)] | x <- srcRT]
         nodesRT1 = concat nodesRT
         nodesRT2 = filter (/= srcNode) nodesRT1
-        allNodes =  removeDuplicates (nodesRT2 ++ beacons)
-        distTable = zip allNodes $ map (xor destAddress) allNodesAddress-- Calculate (address, distance) list
+        allNodes =  nub (nodesRT2 ++ beacons)
+        distTable = zip allNodes $ map (dist destAddress) allNodesAddress-- Calculate (address, distance) list
         allNodesAddress = map fst (allNodes)        
         destAddress = fst destNode
         sortedTable = map fst $ sortBy (comparing snd) distTable -- Sort above list by distance
@@ -231,13 +219,13 @@ findRouteClosest _ 0 _ _ _ _ _ _ _ _ = []
 findRouteClosest numQrdNds numPths degreeTable neighborTable combRT srcNode srcBR destNode destBR srcClosestNodes = finalPaths
   where nxtNode = head srcClosestNodes
         nxtRT = formRoutingTable scanRadius nxtNode nxtNode degreeTable neighborTable
-        combRT1 = removeDuplicates (combRT ++ nxtRT)
+        combRT1 = nub (combRT ++ nxtRT)
         beacons = map (fst) srcBR
         paths = if' (nxtNode `elem` beacons) paths8 paths3
         paths7 = formRoute numPths [] combRT1 nxtNode destNode --find path to src node
         paths1 = formRoute numPths [] combRT1 srcNode destNode
         paths2 = paths1 -- ++ --(formRouteBeacons numPths combRT1 srcNode srcBR destNode) -- ++ (formRouteDestBeacons numPths combRT1 srcNode destBR destNode)
-        paths3 = removeDuplicates paths2
+        paths3 = nub paths2
         pathToBeacon = snd $ head (filter (getBeaconRoute) srcBR)
         getBeaconRoute x = fst x == nxtNode
         pathToBeacon1 = init pathToBeacon
@@ -246,7 +234,7 @@ findRouteClosest numQrdNds numPths degreeTable neighborTable combRT srcNode srcB
         size1 = length paths
         paths4 = findRouteClosest (numQrdNds - 1) (numPths - size1) degreeTable neighborTable combRT1 srcNode srcBR destNode destBR (tail srcClosestNodes)
         paths5 = paths ++ paths4
-        paths6 = removeDuplicates paths5
+        paths6 = nub paths5
  
 formRouteBeacons :: NumPaths -> CombinedRoutingTable -> SourceNode -> SourceBeaconRoutes -> DestinationNode -> FinalPaths
 formRouteBeacons _ _ _ [] _ = []
@@ -316,7 +304,7 @@ findRoutes degreeTable neighborTable combRT srcNode destNode =  finalPathsq0
         destBR = fst (findBeacons destRT [destNode] [] degreeTable neighborTable numBeacons destNode)  
         paths4q0 = findCommonBeacons srcBR destBR
         paths5q0 = take numPths1 $ sortBy (comparing length) (paths4q0)
-        paths6q0 = removeDuplicates (paths3q0 ++ paths5q0)
+        paths6q0 = nub (paths3q0 ++ paths5q0)
         --finalPathsq0 = if' (size2 < numCandidateRoutes) finalPathsq1 paths3q0
         finalPathsq0 = if' (size2 == 0) finalPathsq1 paths3q0
 
@@ -328,7 +316,7 @@ findRoutes degreeTable neighborTable combRT srcNode destNode =  finalPathsq0
         paths1q1 = paths6q0 ++ (formRoute numPths3 [] combRT1 srcNode destNode)
         paths2q1 = paths1q1 ++ (formRouteBeacons numPths3 combRT1 srcNode srcBR destNode)   
         paths3q1 = paths2q1 ++ (formRouteDestBeacons numPths3 combRT1 srcNode srcBR destNode) 
-        paths4q1 = removeDuplicates paths3q1
+        paths4q1 = nub paths3q1
         paths5q1  = take numCandidateRoutes paths3q1 
 
         --finalPathsq2 = if'(size4 == 0) paths3q2 paths5q1
@@ -337,7 +325,7 @@ findRoutes degreeTable neighborTable combRT srcNode destNode =  finalPathsq0
         --srcClosestNodes = findClosest srcNode combRT srcBR destNode
         --numPths4 = numCandidateRoutes - size4
         --paths1q2 = findRouteClosest numQueriedNodes numPths4 degreeTable neighborTable combRT srcNode srcBR destNode destBR srcClosestNodes
-        --paths2q2 = removeDuplicates paths1q2
+        --paths2q2 = nub paths1q2
         --paths12 = filter (checkSource) paths9
         --paths3q2 = take numCandidateRoutes $ sortBy (comparing length) (paths2q2)
 
@@ -355,48 +343,42 @@ findAccessibleNodes index srcNode srcRT nodeTable degreeTable neighborTable = ac
 main :: IO ()
 main = do
 
-  --beacon discovery
+  -- Graph initialization
   gen <- initialize (DV.singleton seedForRNG)
   wG <- wattsStrogatzGraph gen numVertices numRingNeighbors probRewiring
+  addresses <- replicateM numVertices $ genAddress gen
 
   let g = graphInfoToUGr wG
-  
-  addresses <- replicateM numVertices $ genAddress gen
-  
-  let srcIndex = 2
+      nodeTable = nodes $ g
+      nodeTable1 = zip addresses nodeTable
+      degreeTable = (map $ deg g) . nodes $ g
+      degreeTable1 = zip addresses degreeTable
+      neighborTable = (map $ neighbors g) . nodes $ g
 
-  
-  let nodeTable = nodes $ g
   --print "Nodes"
-  let nodeTable1 = zip addresses nodeTable
   --print nodeTable1
-  let degreeTable = (map $ deg g) . nodes $ g
   --print "Degree"
-  let degreeTable1 = zip addresses degreeTable
   --print degreeTable1
-
-  let neighborTable = (map $ neighbors g) . nodes $ g
   --print "Neighbors"
 
   let source = nodeTable1 !! 0
-  let destination = nodeTable1 !! 497
-  let neighborTable1 =  [ map ( nodeTable1 !! ) x | x <- neighborTable]
-  let neighborTable2 = zip nodeTable1 neighborTable1
+      destination = nodeTable1 !! 497
+      neighborTable1 =  [ map ( nodeTable1 !! ) x | x <- neighborTable]
+      neighborTable2 = zip nodeTable1 neighborTable1
 
   --let neighbor1 = neighbors g (nodeTable !! 1)
   --let neighbor2 = neighbors g (nodeTable !! 8)
 
   --print "Routing Table for Source Node 2" -- A tuple indicates a payment channel
   let sourceRoutingTable = formRoutingTable scanRadius source source degreeTable1 neighborTable2
-  let destinationRoutingTable = formRoutingTable scanRadius destination destination degreeTable1 neighborTable2
-  let sourceParameters = findBeacons sourceRoutingTable [source] [] degreeTable1 neighborTable2 numBeacons source
-  let sourceBeacons = fst sourceParameters
-  let destinationParameters = findBeacons destinationRoutingTable [destination] [] degreeTable1 neighborTable2 numBeacons destination
-  let destinationBeacons = fst destinationParameters
+      destinationRoutingTable = formRoutingTable scanRadius destination destination degreeTable1 neighborTable2
+      sourceParameters = findBeacons sourceRoutingTable [source] [] degreeTable1 neighborTable2 numBeacons source
+      sourceBeacons = fst sourceParameters
+      destinationParameters = findBeacons destinationRoutingTable [destination] [] degreeTable1 neighborTable2 numBeacons destination
+      destinationBeacons = fst destinationParameters
   
   --let routes = findRoutes degreeTable1 neighborTable2 sourceRoutingTable source destination
   let accNodes = findAccessibleNodes 1 source sourceRoutingTable nodeTable1 degreeTable1 neighborTable2
   print "Number of Accesssible Nodes"
   print $ length accNodes
 
-  
