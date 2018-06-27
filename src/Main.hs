@@ -332,11 +332,11 @@ findRoutes degreeTable neighborTable combRT srcNode destNode =  finalPathsq0
 
 findAccessibleNodes :: Index -> SourceNode -> SourceRoutingTable -> [Node]-> DegreeTable -> NeighbourTable  -> [Node]
 findAccessibleNodes 2000 _ _ _ _ _ = []
-findAccessibleNodes index srcNode srcRT nodeTable degreeTable neighborTable = accNodes
-  where destNode = nodeTable !! index
+findAccessibleNodes index srcNode srcRT nodeList degreeTable neighborTable = accNodes
+  where destNode = nodeList !! index
         paths = findRoutes degreeTable neighborTable srcRT srcNode destNode
         potentialNode = if' (paths == []) [] [destNode]
-        accNodes = potentialNode ++ (findAccessibleNodes (index + 1) srcNode srcRT nodeTable degreeTable neighborTable) 
+        accNodes = potentialNode ++ (findAccessibleNodes (index + 1) srcNode srcRT nodeList degreeTable neighborTable)
 
 
 
@@ -349,11 +349,11 @@ main = do
   addresses <- replicateM numVertices $ genAddress gen
 
   let g = graphInfoToUGr wG
-      nodeTable = nodes $ g
-      nodeTable1 = zip addresses nodeTable
-      degreeTable = (map $ deg g) . nodes $ g
+      nodeList = nodes g
+      nodeTable1 = zip addresses nodeList
+      degreeTable = deg g <$> nodeList
       degreeTable1 = zip addresses degreeTable
-      neighborTable = (map $ neighbors g) . nodes $ g
+      neighborTable = neighbors g <$> nodeList
 
   --print "Nodes"
   --print nodeTable1
@@ -366,8 +366,8 @@ main = do
       neighborTable1 =  [ map ( nodeTable1 !! ) x | x <- neighborTable]
       neighborTable2 = zip nodeTable1 neighborTable1
 
-  --let neighbor1 = neighbors g (nodeTable !! 1)
-  --let neighbor2 = neighbors g (nodeTable !! 8)
+  --let neighbor1 = neighbors g (nodeList !! 1)
+  --let neighbor2 = neighbors g (nodeList !! 8)
 
   --print "Routing Table for Source Node 2" -- A tuple indicates a payment channel
   let sourceRoutingTable = formRoutingTable scanRadius source source degreeTable1 neighborTable2
