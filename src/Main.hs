@@ -16,10 +16,24 @@ import           Data.Graph.Generators.Random.WattsStrogatz (wattsStrogatzGraph)
 import qualified Data.Graph.Inductive.Graph as GIG
 import qualified Data.Graph.Inductive.Basic as GIB
 import           Data.Graph.Inductive.PatriciaTree (Gr)
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Map.Strict as Map
 
 type NodeAddress = Word64
 type AddressDistance = Word64
 type Satoshi = Int
+
+-- A channel is a ordered pair of vertices
+type Channel = GIG.Edge
+
+
+
+-- Node state has the routing table which is just a
+-- collection of directed edges with associated capacity.
+-- Later node state can have up/down information
+data NodeState = NS {
+  rtable  :: Map.Map Channel Satoshi
+}
 
 -- Watts-Strogatz graph generation parameters
 numVertices = 2000
@@ -52,53 +66,18 @@ main = do
   wG <- wattsStrogatzGraph gen numVertices numRingNeighbors probRewiring
   addresses <- replicateM numVertices $ genAddress gen
 
-  let labelledNodes = zip [0..(numVertices-1)] addresses
+  let vertexList = [0..(numVertices-1)]
+      -- Label the vertices with their addresses
+      labelledNodes = zip vertexList addresses
 
       -- Add edges in the reverse direction to existing edges
-      unlabelledEdges = GG.edges wG ++ (swap <$> GG.edges wG)
+      edgeList = GG.edges wG ++ (swap <$> GG.edges wG)
 
-      -- Assign 1 BTC capacity to all the edges (payment channels).
-      -- This corresponds to a flow of 1 BTC in each direction between
-      -- adjacent nodes
-      labelledEdges = (\(x,y) -> (x, y, oneBTC)) <$> unlabelledEdges
+      -- Label the edges with their capacity. All edge capacities
+      -- initialized to 1 BTC. Note that the edges are directed.
+      labelledEdges = (\e -> GIG.toLEdge e oneBTC) <$> edgeList
 
       -- Make a graph with labelled nodes and edges
       g = GIG.mkGraph labelledNodes labelledEdges :: Gr NodeAddress Satoshi
 
   putStrLn "Done"
-
-
---  let g = graphInfoToUGr wG
---      nodeList = nodes g
---      nodeTable1 = zip addresses nodeList
---      degreeTable = deg g <$> nodeList
---      degreeTable1 = zip addresses degreeTable
---      neighborTable = neighbors g <$> nodeList
---
---  --print "Nodes"
---  --print nodeTable1
---  --print "Degree"
---  --print degreeTable1
---  --print "Neighbors"
---
---  let source = nodeTable1 !! 0
---      destination = nodeTable1 !! 497
---      neighborTable1 =  [ map ( nodeTable1 !! ) x | x <- neighborTable]
---      neighborTable2 = zip nodeTable1 neighborTable1
---
---  --let neighbor1 = neighbors g (nodeList !! 1)
---  --let neighbor2 = neighbors g (nodeList !! 8)
---
---  --print "Routing Table for Source Node 2" -- A tuple indicates a payment channel
---  let sourceRoutingTable = formRoutingTable scanRadius source source degreeTable1 neighborTable2
---      destinationRoutingTable = formRoutingTable scanRadius destination destination degreeTable1 neighborTable2
---      sourceParameters = findBeacons sourceRoutingTable [source] [] degreeTable1 neighborTable2 numBeacons source
---      sourceBeacons = fst sourceParameters
---      destinationParameters = findBeacons destinationRoutingTable [destination] [] degreeTable1 neighborTable2 numBeacons destination
---      destinationBeacons = fst destinationParameters
---  
---  --let routes = findRoutes degreeTable1 neighborTable2 sourceRoutingTable source destination
---  let accNodes = findAccessibleNodes 1 source sourceRoutingTable nodeTable1 degreeTable1 neighborTable2
---  print "Number of Accesssible Nodes"
---  print $ length accNodes
-
