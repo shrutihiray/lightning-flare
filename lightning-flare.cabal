@@ -25,3 +25,4 @@ executable lightning-flare
                        , vector
                        , bytestring
                        , containers
+                       , sort

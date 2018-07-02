@@ -8,18 +8,21 @@ import           Control.Monad (replicateM)
 import qualified Data.Vector.Unboxed as DV
 import qualified Data.Map.Strict as Map
 import           Data.Word (Word32, Word64)
-import           Data.List (sortBy, elemIndex, findIndex, length, nub)
+import           Data.List (sortBy, elemIndex, findIndex, length, nub, delete)
 import           Data.Tuple (swap)
 import           Data.Bits (xor)
 import qualified Data.Graph.Generators as GG
 import           Data.Graph.Generators.Random.WattsStrogatz (wattsStrogatzGraph)
 import qualified Data.Graph.Inductive.Graph as GIG
 import qualified Data.Graph.Inductive.Basic as GIB
+import qualified Data.Graph.Inductive.Query.BFS as BFS
 import           Data.Graph.Inductive.PatriciaTree (Gr)
-import           Data.IntMap.Strict (IntMap)
+import           Data.IntMap.Strict (IntMap, (!))
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import           Control.Monad.RWS
+import           Data.Maybe (fromJust)
+import           Data.Sort (sortOn)
 
 type GraphOrder = Int
 type NumRingNeighbors = Int
@@ -70,8 +73,8 @@ instance Monoid LNetworkStatistics where
     numBeaconRequests = numBeaconRequests s1 + numBeaconRequests s2
   }
 
-oneHelloMessageSent = initialStats { numHelloMessages = 1}
-oneBeaconRequestSent = initialStats { numBeaconRequests = 1}
+oneHelloMessageSent = initialStats { numHelloMessages = 1 }
+oneBeaconRequestSent = initialStats { numBeaconRequests = 1 }
 
 type Channel = GIG.Edge -- A channel is a ordered pair of vertices
 type Satoshi = Int
@@ -80,11 +83,15 @@ type Satoshi = Int
 -- collection of directed edges with associated capacity.
 -- Later node state can have up/down information
 data NodeState = NodeState {
-  rtable  :: Map.Map Channel Satoshi
+  neighboringNodes      :: [GIG.Node],
+  neighboringChannels   :: Map.Map Channel Satoshi,
+  beacons               :: [GIG.Node]
 }
 
 emptyNodeState = NodeState {
-  rtable = Map.empty
+  neighboringNodes = [],
+  neighboringChannels = Map.empty,
+  beacons = []
 }
 
 type ChannelCapacityMap = Map.Map Channel Satoshi
@@ -161,19 +168,54 @@ buildNeighborhoodMap = do
       -- TODO: Incomplete implementation
     _ -> error "Unsupported routing algorithm"
 
--- The second parameter needs to be a positive integer
-findNeighborhoodChannels :: GIG.Node -> NeighborRadius -> Event
-findNeighborhoodChannels n r = do
-  g <-  gets networkGraph
-  let nodeNeighbors = GIG.suc g n
-      neighborChannels = map (\x -> (n, x)) nodeNeighbors
-      chanlist = recursiveFind g r [n] []
-  modify $ id
-  -- TODO: Incomplete implementation
+-- Note: If a channel is not found in the channel capacity map, then
+-- its capacity is initialized to zero
+labelChannel :: ChannelCapacityMap -> Channel -> (Channel, Satoshi)
+labelChannel ccmap c = (c, Map.findWithDefault 0 c ccmap)
 
-recursiveFind :: Gr NodeAddress () -> NeighborRadius -> [GIG.Node] -> [Channel] -> [Channel]
-recursiveFind g 0 nlist chanlist = chanlist
--- TODO: Incomplete implementation
+-- The second parameter needs to be a positive integer
+findNeighborhoodChannels :: NeighborRadius -> GIG.Node -> Event
+findNeighborhoodChannels r n = do
+  g <- gets networkGraph
+  chanCaps <- gets channelCapacities
+
+  -- TODO: This is inefficient as we are calculating the whole BFS node list
+  -- TODO: Write version of level which exits after the scan radius exceeds r
+  let bfsNodeListWithDistances = BFS.level n g
+      nodesWithinRadius = map fst $ filter (\(_, d) -> d <= r) bfsNodeListWithDistances
+      channelsWithinRadius = GIG.edges $ GIG.subgraph nodesWithinRadius g
+      channelsWithCapacities = map (labelChannel chanCaps) channelsWithinRadius
+    in modify $ \lnst ->
+        let nstatemap = nodeStateMap lnst
+            nstate = NodeState {
+              neighboringNodes = delete n nodesWithinRadius,
+              neighboringChannels = Map.fromList channelsWithCapacities,
+              beacons = []
+            }
+          in lnst { nodeStateMap = IntMap.insert n nstate nstatemap }
+
+findBeaconCandidates :: GIG.Node -> NodeStateMap -> [GIG.Node]
+findBeaconCandidates n nstatemap =
+  let nstate = nstatemap ! n
+      nbhood = neighboringNodes nstate
+      nbrOfNbrs = nub . concat $ map (neighboringNodes . (nstatemap !)) nbhood
+    in nbhood ++ nbrOfNbrs
+
+setBeacons :: NumBeacons -> GIG.Node -> Event
+setBeacons nb n = do
+  g <- gets networkGraph
+  nstatemap <- gets nodeStateMap
+  let beaconCandidates = findBeaconCandidates n nstatemap
+      beaconAddresses = map (fromJust . GIG.lab g) beaconCandidates
+      sourceAddress = fromJust $ GIG.lab g n
+      beaconAddressDistances = map (dist sourceAddress) beaconAddresses
+      labelledBeacons = zip beaconCandidates beaconAddressDistances
+      sortedBeaconWithAddresses = sortOn snd labelledBeacons
+      beaconList = map fst $ take nb sortedBeaconWithAddresses
+    in modify $ \lnst ->
+        let nstate = nstatemap ! n
+            nstateWithNewBeacons = nstate { beacons = beaconList }
+          in lnst { nodeStateMap = IntMap.insert n nstateWithNewBeacons nstatemap }
 
 
 lightningSim :: Event
@@ -181,6 +223,11 @@ lightningSim = do
   generateNetworkGraph
   -- Initialize all channels to have capacity of 2 BTC.
   initializeChannelCapacities oneBTC
+  nodeList <- gets (GIG.nodes . networkGraph)
+  nradius <- asks (neighborRadius . routingType)
+  mapM_ (findNeighborhoodChannels nradius) nodeList
+  nbeacons <- asks (numBeacons . routingType)
+  mapM_ (setBeacons nbeacons) nodeList
 
 main :: IO ()
 main = do
@@ -218,10 +265,5 @@ main = do
   }
 
   (finalSate, stats) <- execRWST lightningSim lnconfig initialLNState
-
-
---      -- Initialize the routing tables of all the nodes
---      nodeStates = IntMap.fromList $ zip vertexList (repeat NodeSt { rtable = Map.empty })
-
 
   putStrLn "Done"
