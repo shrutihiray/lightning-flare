@@ -157,6 +157,7 @@ initializeChannelCapacities s = do
 findNeighborhoodChannels :: NeighborRadius -> GIG.Node -> Event ()
 findNeighborhoodChannels nradius src = do
   g <- gets networkGraph
+  nstatemap <- gets nodeStateMap
 
   -- TODO: This is inefficient as we are calculating the whole BFS node list
   -- TODO: Write version of level which exits after the scan radius exceeds nradius
@@ -166,9 +167,7 @@ findNeighborhoodChannels nradius src = do
         routingTable = GIG.subgraph nodesWithinRadius g,
         responsive = True
       }
-    in modify $ \lnst ->
-        let nstatemap = nodeStateMap lnst
-          in lnst { nodeStateMap = IntMap.insert src nstate nstatemap }
+  modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate nstatemap }
 
 type BeaconCandidateInfoList = [(GIG.Node, NodeAddress, GIG.Path)]
 type ProcessedNodes = [GIG.Node]
@@ -211,7 +210,7 @@ recurSetBeacons nb src [] _ rnInfoList = do
       pathsToResponsiveNodes = map (\(_, _, p) -> p) closestResponsiveNodeInfoList
       srcNbhoodGraph' = GIB.undir $ foldl insertPathIntoGraph srcNbhoodGraph pathsToResponsiveNodes
       nstate' = nstate { routingTable = srcNbhoodGraph' }
-    in modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate' nstatemap }
+  modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate' nstatemap }
 
 recurSetBeacons nb src beaconCandidateInfoList pnList rnInfoList = do
   let beaconCandidateInfo@(beaconCandidateId, _, _) = minimumBy (comparing (\(_, addr, _) -> addr)) beaconCandidateInfoList
@@ -239,7 +238,7 @@ setBeacons nb src = do
       nbhoodAddressDistances = map (dist sourceAddress) nbhoodAddresses
       nbhoodPaths = map (\b -> BFS.esp src b srcNbhoodGraph) srcNbhoodNodes
       beaconCandidateInfoList = zip3 srcNbhoodNodes nbhoodAddressDistances nbhoodPaths
-    in recurSetBeacons nb src beaconCandidateInfoList [] []
+  recurSetBeacons nb src beaconCandidateInfoList [] []
 
 populateRoutingTables :: Event ()
 populateRoutingTables = do
@@ -299,6 +298,6 @@ main = do
     randomNumGen = gen
   }
 
-  (finalSate, stats) <- execRWST lightningSim lnconfig initialLNState
+  (finalState, stats) <- execRWST lightningSim lnconfig initialLNState
 
   putStrLn "Done"
