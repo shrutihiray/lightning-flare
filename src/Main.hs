@@ -23,6 +23,9 @@ import qualified Data.Map.Strict as Map
 import           Control.Monad.RWS
 import           Data.Maybe (fromJust)
 import           Data.Sort (sortOn)
+import qualified Data.Set as Set
+import           Data.Foldable (minimumBy)
+import           Data.Ord (comparing)
 
 type GraphOrder = Int
 type NumRingNeighbors = Int
@@ -53,12 +56,9 @@ data LNetworkConfig = LNetworkConfig {
   routingType         :: RoutingType
 }
 
-type NumHelloMessages = Int
-type NumBeaconRequests = Int
-
 data LNetworkStatistics = LNetworkStatistics {
-  numHelloMessages    :: NumHelloMessages,
-  numBeaconRequests   :: NumBeaconRequests
+  numHelloMessages    :: Int,
+  numBeaconRequests   :: Int
 }
 
 initialStats = LNetworkStatistics {
@@ -84,14 +84,14 @@ type Satoshi = Int
 -- Later node state can have up/down information
 data NodeState = NodeState {
   neighboringNodes      :: [GIG.Node],
-  neighboringChannels   :: Map.Map Channel Satoshi,
-  beacons               :: [GIG.Node]
+  neighboringChannels   :: Set.Set Channel,
+  responsive            :: Bool
 }
 
 emptyNodeState = NodeState {
   neighboringNodes = [],
-  neighboringChannels = Map.empty,
-  beacons = []
+  neighboringChannels = Set.empty,
+  responsive = True
 }
 
 type ChannelCapacityMap = Map.Map Channel Satoshi
@@ -104,12 +104,14 @@ data LNetworkState = LNetworkState {
   randomNumGen      :: MWC.GenIO
 }
 
-type Event = RWST LNetworkConfig LNetworkStatistics LNetworkState IO ()
+type Event a = RWST LNetworkConfig LNetworkStatistics LNetworkState IO a
 
 oneBTC = 100000000 :: Satoshi
 
 type NodeAddress = Word64
 type AddressDistance = Word64
+type NodeWithAddress = GIG.LNode NodeAddress -- equivalent to (GIG.Node, NodeAddress)
+type NodeWithHopCount = GIG.LNode Int -- equivalent to (GIG.Node, Int)
 
 genAddress :: MWC.GenIO -> IO NodeAddress
 genAddress = MWC.uniform
@@ -120,7 +122,7 @@ hexAddress addr = (++) "0x" $ showHex addr ""
 dist :: NodeAddress -> NodeAddress -> AddressDistance
 dist = xor
 
-generateNetworkGraph :: Event
+generateNetworkGraph :: Event ()
 generateNetworkGraph = do
   gen <- gets randomNumGen
   gtype <- asks graphType
@@ -150,14 +152,14 @@ generateNetworkGraph = do
 -- capacity. Adjacent nodes have two edges, one in each
 -- direction. So the capacity of the channel is technically
 -- twice the first argument passed to initializeChannelCapacities
-initializeChannelCapacities :: Satoshi -> Event
+initializeChannelCapacities :: Satoshi -> Event ()
 initializeChannelCapacities s = do
   edgeList <- gets (GIG.edges . networkGraph)
   modify $ \lnst -> lnst { channelCapacities = Map.fromList $ zip edgeList (repeat s) }
 
 -- Populate each node's routing table with neighbors which are
 -- at most neighborRadius hops away
-buildNeighborhoodMap :: Event
+buildNeighborhoodMap :: Event ()
 buildNeighborhoodMap = do
   rtype <- asks routingType
   case rtype of
@@ -168,13 +170,8 @@ buildNeighborhoodMap = do
       -- TODO: Incomplete implementation
     _ -> error "Unsupported routing algorithm"
 
--- Note: If a channel is not found in the channel capacity map, then
--- its capacity is initialized to zero
-labelChannel :: ChannelCapacityMap -> Channel -> (Channel, Satoshi)
-labelChannel ccmap c = (c, Map.findWithDefault 0 c ccmap)
-
 -- The second parameter needs to be a positive integer
-findNeighborhoodChannels :: NeighborRadius -> GIG.Node -> Event
+findNeighborhoodChannels :: NeighborRadius -> GIG.Node -> Event ()
 findNeighborhoodChannels r n = do
   g <- gets networkGraph
   chanCaps <- gets channelCapacities
@@ -184,41 +181,72 @@ findNeighborhoodChannels r n = do
   let bfsNodeListWithDistances = BFS.level n g
       nodesWithinRadius = map fst $ filter (\(_, d) -> d <= r) bfsNodeListWithDistances
       channelsWithinRadius = GIG.edges $ GIG.subgraph nodesWithinRadius g
-      channelsWithCapacities = map (labelChannel chanCaps) channelsWithinRadius
     in modify $ \lnst ->
         let nstatemap = nodeStateMap lnst
             nstate = NodeState {
               neighboringNodes = delete n nodesWithinRadius,
-              neighboringChannels = Map.fromList channelsWithCapacities,
-              beacons = []
+              neighboringChannels = Set.fromList channelsWithinRadius,
+              responsive = True
             }
           in lnst { nodeStateMap = IntMap.insert n nstate nstatemap }
 
-findBeaconCandidates :: GIG.Node -> NodeStateMap -> [GIG.Node]
-findBeaconCandidates n nstatemap =
-  let nstate = nstatemap ! n
-      nbhood = neighboringNodes nstate
-      nbrOfNbrs = nub . concat $ map (neighboringNodes . (nstatemap !)) nbhood
-    in nbhood ++ nbrOfNbrs
+type HopDistance = Int
+type UnprocessNodeInfoList = [(GIG.Node, NodeAddress, HopDistance)]
+type ProcessedNodes = [GIG.Node]
+type ResponsiveNodes = [GIG.Node]
+type Beacons = [GIG.Node]
+type PathsToBeacons = [GIG.Path]
 
-setBeacons :: NumBeacons -> GIG.Node -> Event
+sendBeaconRequest :: GIG.Node -> GIG.Node -> Event Maybe (Beacons, PathsToBeacons)
+sendBeaconRequest src dst = do
+  tell oneBeaconRequestSent
+  nstatemap <- gets nodeStateMap
+  case (responsive $ nstatemap ! dst) of
+    False -> return Nothing
+    True -> do
+      g <- gets networkGraph
+      let dstNbhood = neighboringNodes (nstatemap ! dst)
+          dstAddress = fromJust $ GIG.lab g dst
+          srcAddress = fromJust $ GIG.lab g src
+          newBeaconCandidates = filter (\x -> (dist xAddress srcAddress) < (dist xAddress dstAddress)
+                                          where xAddress = GIG.lab g x
+                                       ) dstNbhood
+          pathsToBeaconCandidates = map (\b -> BFS.esp dst b g) newbeaconCandidates
+      return (newBeaconCandidates, pathsToBeaconCandidates)
+
+recurSetBeacons :: NumBeacons -> GIG.Node -> UnprocessNodeInfoList -> ProcessedNodes -> ResponsiveNodes -> Event ()
+recurSetBeacons nb src [] pnList rnList = return
+recurSetBeacons nb src upnList pnList rnList = do
+  let (beaconCandidate, _, _) = minimumBy (comparing (\(_, addr, _) -> addr)) upnList
+      pnListNew = beaconCandidate:pnList
+      upnListRemaining = delete beaconCandidate upnList
+  beaconReqResponse <- sendBeaconRequest src beaconCandidate
+  case beaconReqResponse of
+    Nothing -> recurSetBeacons src upnListRemaining pnListNew rnList
+    Just (newBeacons, pathsToNewBeacons) -> do
+      g <- gets networkGraph
+      let rnListNew = cndte:rnList
+          srcAddress = fromJust $ GIG.lab g src
+          beaconAddresses = map (fromJust . GIG.lab g) newBeacons
+          newBeaconAddressDistances = map (dist srcAddress) newBeacons
+          newBeaconHopDistances = map (\b -> length $ BFS.esp src b g) newBeacons
+          newBeaconInfoList = zip3 newBeacons newBeaconAddressDistances newBeaconHopDistances
+          totalBeaconInfoList = take nb . sortBy (\(_, _, d) -> d) $ newBeaconInfoList ++ upnListRemaining
+      recurSetBeacons nb src totalBeaconInfoList pnListNew rnListNew
+
+setBeacons :: NumBeacons -> GIG.Node -> Event ()
 setBeacons nb n = do
   g <- gets networkGraph
   nstatemap <- gets nodeStateMap
-  let beaconCandidates = findBeaconCandidates n nstatemap
-      beaconAddresses = map (fromJust . GIG.lab g) beaconCandidates
+  let nbhood = neighboringNodes (nstatemap ! n)
+      nbhoodAddresses = map (fromJust . GIG.lab g) nbhood
       sourceAddress = fromJust $ GIG.lab g n
-      beaconAddressDistances = map (dist sourceAddress) beaconAddresses
-      labelledBeacons = zip beaconCandidates beaconAddressDistances
-      sortedBeaconWithAddresses = sortOn snd labelledBeacons
-      beaconList = map fst $ take nb sortedBeaconWithAddresses
-    in modify $ \lnst ->
-        let nstate = nstatemap ! n
-            nstateWithNewBeacons = nstate { beacons = beaconList }
-          in lnst { nodeStateMap = IntMap.insert n nstateWithNewBeacons nstatemap }
+      nbhoodAddressDistances = map (dist sourceAddress) nbhoodAddresses
+      nbhoodHopDistances = map (\b -> length $ BFS.esp n b g) nbhood
+      beaconCandidateInfoList = zip3 nbhood nbhoodAddressDistances nbhoodHopDistances
+    in recurSetBeacons nb n beaconCandidateInfoList [] []
 
-
-lightningSim :: Event
+lightningSim :: Event ()
 lightningSim = do
   generateNetworkGraph
   -- Initialize all channels to have capacity of 2 BTC.
