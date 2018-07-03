@@ -58,23 +58,27 @@ data LNetworkConfig = LNetworkConfig {
 
 data LNetworkStatistics = LNetworkStatistics {
   numHelloMessages    :: Int,
-  numBeaconRequests   :: Int
-}
+  numBeaconRequests   :: Int,
+  reachableNodeCounts :: [Int]
+} deriving (Show)
 
 initialStats = LNetworkStatistics {
   numHelloMessages = 0,
-  numBeaconRequests = 0
+  numBeaconRequests = 0,
+  reachableNodeCounts = []
 }
 
 instance Monoid LNetworkStatistics where
   mempty = initialStats
   s1 `mappend` s2 = LNetworkStatistics {
     numHelloMessages = numHelloMessages s1 + numHelloMessages s2,
-    numBeaconRequests = numBeaconRequests s1 + numBeaconRequests s2
+    numBeaconRequests = numBeaconRequests s1 + numBeaconRequests s2,
+    reachableNodeCounts = reachableNodeCounts s1 ++ reachableNodeCounts s2
   }
 
 oneHelloMessageSent = initialStats { numHelloMessages = 1 }
 oneBeaconRequestSent = initialStats { numBeaconRequests = 1 }
+newReachableNodeCount x = initialStats { reachableNodeCounts = [x] }
 
 type Channel = GIG.Edge -- A channel is a ordered pair of vertices
 type Satoshi = Int
@@ -256,18 +260,29 @@ populateRoutingTables = do
 
     _ -> error "Unsupported routing algorithm"
 
-lightningSim :: Event ()
-lightningSim = do
+reachabilityExperiment :: Int -> Event ()
+reachabilityExperiment numIterations = do
+  gen <- gets randomNumGen
+  numNodes <- asks $ graphOrder . graphType
+  sourceNodes <- liftIO $ mapM (\_ -> MWC.uniformR (0, numNodes-1) gen) [1..numIterations]
+  nstatemap <- gets nodeStateMap
+  let sourceNodeRoutingGraphs = map (routingTable . (nstatemap ! )) sourceNodes
+      counts = map (\x -> (GIG.order x) - 1) sourceNodeRoutingGraphs
+  tell initialStats { reachableNodeCounts = counts }
+
+lightningSim :: Int -> Event ()
+lightningSim numIterations = do
   generateNetworkGraph
   -- Initialize all channels to have capacity of 2 BTC.
   initializeChannelCapacities oneBTC
   populateRoutingTables
+  reachabilityExperiment numIterations
 
 main :: IO ()
 main = do
   -- Watts-Strogatz graph generation parameters
   let gtype = WattsStrogatzGraph {
-        graphOrder = 2000,
+        graphOrder = 100,
         numRingNeighbors = 4,
         rewiringProbability = 0.3
       }
@@ -298,6 +313,8 @@ main = do
     randomNumGen = gen
   }
 
-  (finalState, stats) <- execRWST lightningSim lnconfig initialLNState
-
+  let numiter = 10
+  (finalState, stats) <- execRWST (lightningSim numiter) lnconfig initialLNState
+  let avg = (fromIntegral $ sum (reachableNodeCounts stats))/(fromIntegral numiter)
+  putStrLn $ show avg
   putStrLn "Done"
