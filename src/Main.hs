@@ -8,7 +8,7 @@ import           Control.Monad (replicateM)
 import qualified Data.Vector.Unboxed as DV
 import qualified Data.Map.Strict as Map
 import           Data.Word (Word32, Word64)
-import           Data.List (sortBy, elemIndex, findIndex, length, nub, delete)
+import           Data.List (length, delete)
 import           Data.Tuple (swap)
 import           Data.Bits (xor)
 import qualified Data.Graph.Generators as GG
@@ -80,17 +80,15 @@ type Channel = GIG.Edge -- A channel is a ordered pair of vertices
 type Satoshi = Int
 
 -- Node state has the routing table which is just a
--- collection of directed edges with associated capacity.
--- Later node state can have up/down information
+-- subgraph of the network graph in the local neighborhood
+-- of the node
 data NodeState = NodeState {
-  neighboringNodes      :: [GIG.Node],
-  neighboringChannels   :: Set.Set Channel,
-  responsive            :: Bool
+  routingTable      :: Gr NodeAddress (),
+  responsive        :: Bool
 }
 
 emptyNodeState = NodeState {
-  neighboringNodes = [],
-  neighboringChannels = Set.empty,
+  routingTable = GIG.empty,
   responsive = True
 }
 
@@ -110,8 +108,6 @@ oneBTC = 100000000 :: Satoshi
 
 type NodeAddress = Word64
 type AddressDistance = Word64
-type NodeWithAddress = GIG.LNode NodeAddress -- equivalent to (GIG.Node, NodeAddress)
-type NodeWithHopCount = GIG.LNode Int -- equivalent to (GIG.Node, Int)
 
 genAddress :: MWC.GenIO -> IO NodeAddress
 genAddress = MWC.uniform
@@ -157,47 +153,33 @@ initializeChannelCapacities s = do
   edgeList <- gets (GIG.edges . networkGraph)
   modify $ \lnst -> lnst { channelCapacities = Map.fromList $ zip edgeList (repeat s) }
 
--- Populate each node's routing table with neighbors which are
--- at most neighborRadius hops away
-buildNeighborhoodMap :: Event ()
-buildNeighborhoodMap = do
-  rtype <- asks routingType
-  case rtype of
-    FlareRouting { neighborRadius = nr } -> do
-      g <- gets networkGraph
-      let nodeList = GIG.nodes g
-      modify $ id
-      -- TODO: Incomplete implementation
-    _ -> error "Unsupported routing algorithm"
-
 -- The second parameter needs to be a positive integer
 findNeighborhoodChannels :: NeighborRadius -> GIG.Node -> Event ()
-findNeighborhoodChannels r n = do
+findNeighborhoodChannels nradius src = do
   g <- gets networkGraph
-  chanCaps <- gets channelCapacities
 
   -- TODO: This is inefficient as we are calculating the whole BFS node list
-  -- TODO: Write version of level which exits after the scan radius exceeds r
-  let bfsNodeListWithDistances = BFS.level n g
-      nodesWithinRadius = map fst $ filter (\(_, d) -> d <= r) bfsNodeListWithDistances
-      channelsWithinRadius = GIG.edges $ GIG.subgraph nodesWithinRadius g
+  -- TODO: Write version of level which exits after the scan radius exceeds nradius
+  let bfsNodeListWithDistances = BFS.level src g
+      nodesWithinRadius = map fst $ filter (\(_, d) -> d <= nradius) bfsNodeListWithDistances
+      nstate = NodeState {
+        routingTable = GIG.subgraph nodesWithinRadius g,
+        responsive = True
+      }
     in modify $ \lnst ->
         let nstatemap = nodeStateMap lnst
-            nstate = NodeState {
-              neighboringNodes = delete n nodesWithinRadius,
-              neighboringChannels = Set.fromList channelsWithinRadius,
-              responsive = True
-            }
-          in lnst { nodeStateMap = IntMap.insert n nstate nstatemap }
+          in lnst { nodeStateMap = IntMap.insert src nstate nstatemap }
 
-type HopDistance = Int
-type UnprocessNodeInfoList = [(GIG.Node, NodeAddress, HopDistance)]
+type BeaconCandidateInfoList = [(GIG.Node, NodeAddress, GIG.Path)]
 type ProcessedNodes = [GIG.Node]
-type ResponsiveNodes = [GIG.Node]
+type ResponsiveNodeInfoList = BeaconCandidateInfoList
 type Beacons = [GIG.Node]
 type PathsToBeacons = [GIG.Path]
 
-sendBeaconRequest :: GIG.Node -> GIG.Node -> Event Maybe (Beacons, PathsToBeacons)
+nodeAddress :: Gr NodeAddress () -> GIG.Node -> NodeAddress
+nodeAddress g n = fromJust $ GIG.lab g n
+
+sendBeaconRequest :: GIG.Node -> GIG.Node -> Event (Maybe BeaconCandidateInfoList)
 sendBeaconRequest src dst = do
   tell oneBeaconRequestSent
   nstatemap <- gets nodeStateMap
@@ -205,57 +187,82 @@ sendBeaconRequest src dst = do
     False -> return Nothing
     True -> do
       g <- gets networkGraph
-      let dstNbhood = neighboringNodes (nstatemap ! dst)
-          dstAddress = fromJust $ GIG.lab g dst
-          srcAddress = fromJust $ GIG.lab g src
-          newBeaconCandidates = filter (\x -> (dist xAddress srcAddress) < (dist xAddress dstAddress)
-                                          where xAddress = GIG.lab g x
-                                       ) dstNbhood
-          pathsToBeaconCandidates = map (\b -> BFS.esp dst b g) newbeaconCandidates
-      return (newBeaconCandidates, pathsToBeaconCandidates)
+      let dstNbhoodGraph = routingTable (nstatemap ! dst)
+          dstNbhoodNodes = delete dst $ GIG.nodes dstNbhoodGraph
+          dstAddress = nodeAddress g dst
+          srcAddress = nodeAddress g src
+          newBeaconCandidates = filter (\x -> (dist srcAddress $ nodeAddress g x) < (dist srcAddress dstAddress)) dstNbhoodNodes
+          newBeaconAddressDistances = map (dist srcAddress . nodeAddress g) newBeaconCandidates
+          pathsToBeaconCandidates = map (\b -> BFS.esp dst b dstNbhoodGraph) newBeaconCandidates
+      return $ Just (zip3 newBeaconCandidates newBeaconAddressDistances pathsToBeaconCandidates)
 
-recurSetBeacons :: NumBeacons -> GIG.Node -> UnprocessNodeInfoList -> ProcessedNodes -> ResponsiveNodes -> Event ()
-recurSetBeacons nb src [] pnList rnList = return
-recurSetBeacons nb src upnList pnList rnList = do
-  let (beaconCandidate, _, _) = minimumBy (comparing (\(_, addr, _) -> addr)) upnList
-      pnListNew = beaconCandidate:pnList
-      upnListRemaining = delete beaconCandidate upnList
-  beaconReqResponse <- sendBeaconRequest src beaconCandidate
-  case beaconReqResponse of
-    Nothing -> recurSetBeacons src upnListRemaining pnListNew rnList
-    Just (newBeacons, pathsToNewBeacons) -> do
-      g <- gets networkGraph
-      let rnListNew = cndte:rnList
-          srcAddress = fromJust $ GIG.lab g src
-          beaconAddresses = map (fromJust . GIG.lab g) newBeacons
-          newBeaconAddressDistances = map (dist srcAddress) newBeacons
-          newBeaconHopDistances = map (\b -> length $ BFS.esp src b g) newBeacons
-          newBeaconInfoList = zip3 newBeacons newBeaconAddressDistances newBeaconHopDistances
-          totalBeaconInfoList = take nb . sortBy (\(_, _, d) -> d) $ newBeaconInfoList ++ upnListRemaining
-      recurSetBeacons nb src totalBeaconInfoList pnListNew rnListNew
+insertPathIntoGraph :: Gr NodeAddress () -> GIG.Path -> Gr NodeAddress ()
+insertPathIntoGraph g path = GIG.insEdges es g
+  where
+    es = map (\e -> GIG.toLEdge e ()) $ zip path (tail path)
 
-setBeacons :: NumBeacons -> GIG.Node -> Event ()
-setBeacons nb n = do
+recurSetBeacons :: NumBeacons -> GIG.Node -> BeaconCandidateInfoList -> ProcessedNodes -> ResponsiveNodeInfoList -> Event ()
+recurSetBeacons nb src [] _ rnInfoList = do
   g <- gets networkGraph
   nstatemap <- gets nodeStateMap
-  let nbhood = neighboringNodes (nstatemap ! n)
-      nbhoodAddresses = map (fromJust . GIG.lab g) nbhood
-      sourceAddress = fromJust $ GIG.lab g n
+  let nstate = nstatemap ! src
+      srcNbhoodGraph = routingTable nstate
+      closestResponsiveNodeInfoList = take nb $ sortOn (\( _, addr, _) -> addr) rnInfoList
+      pathsToResponsiveNodes = map (\(_, _, p) -> p) closestResponsiveNodeInfoList
+      srcNbhoodGraph' = GIB.undir $ foldl insertPathIntoGraph srcNbhoodGraph pathsToResponsiveNodes
+      nstate' = nstate { routingTable = srcNbhoodGraph' }
+    in modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate' nstatemap }
+
+recurSetBeacons nb src beaconCandidateInfoList pnList rnInfoList = do
+  let beaconCandidateInfo@(beaconCandidateId, _, _) = minimumBy (comparing (\(_, addr, _) -> addr)) beaconCandidateInfoList
+      newPNList = beaconCandidateId:pnList
+      beaconCandidatesRemaining = delete beaconCandidateInfo beaconCandidateInfoList
+  beaconReqResponse <- sendBeaconRequest src beaconCandidateId
+  case beaconReqResponse of
+    Nothing -> recurSetBeacons nb src beaconCandidatesRemaining newPNList rnInfoList
+    Just newBeaconInfoList -> do
+      g <- gets networkGraph
+      let newRNInfoList = beaconCandidateInfo:rnInfoList
+          beaconCandidateIdsRemaining = map (\(id, _, _) -> id) beaconCandidatesRemaining
+          filteredBeaconInfoList = filter (\(i, _, _) -> i `notElem` beaconCandidateIdsRemaining && i `notElem` newPNList) newBeaconInfoList
+          totalBeaconInfoList = take nb . sortOn (\(_, _, p) -> -(length p)) $ filteredBeaconInfoList ++ beaconCandidatesRemaining
+      recurSetBeacons nb src totalBeaconInfoList newPNList newRNInfoList
+
+setBeacons :: NumBeacons -> GIG.Node -> Event ()
+setBeacons nb src = do
+  g <- gets networkGraph
+  nstatemap <- gets nodeStateMap
+  let srcNbhoodGraph = routingTable (nstatemap ! src)
+      srcNbhoodNodes = GIG.nodes srcNbhoodGraph
+      nbhoodAddresses = map (nodeAddress g) srcNbhoodNodes
+      sourceAddress = nodeAddress g src
       nbhoodAddressDistances = map (dist sourceAddress) nbhoodAddresses
-      nbhoodHopDistances = map (\b -> length $ BFS.esp n b g) nbhood
-      beaconCandidateInfoList = zip3 nbhood nbhoodAddressDistances nbhoodHopDistances
-    in recurSetBeacons nb n beaconCandidateInfoList [] []
+      nbhoodPaths = map (\b -> BFS.esp src b srcNbhoodGraph) srcNbhoodNodes
+      beaconCandidateInfoList = zip3 srcNbhoodNodes nbhoodAddressDistances nbhoodPaths
+    in recurSetBeacons nb src beaconCandidateInfoList [] []
+
+populateRoutingTables :: Event ()
+populateRoutingTables = do
+  rtype <- asks routingType
+  case rtype of
+    FlareRouting {
+      neighborRadius = nradius,
+      numBeacons = nbeacons
+    } -> do
+      nodeList <- gets (GIG.nodes . networkGraph)
+      nradius <- asks (neighborRadius . routingType)
+      mapM_ (findNeighborhoodChannels nradius) nodeList
+      nbeacons <- asks (numBeacons . routingType)
+      mapM_ (setBeacons nbeacons) nodeList
+
+    _ -> error "Unsupported routing algorithm"
 
 lightningSim :: Event ()
 lightningSim = do
   generateNetworkGraph
   -- Initialize all channels to have capacity of 2 BTC.
   initializeChannelCapacities oneBTC
-  nodeList <- gets (GIG.nodes . networkGraph)
-  nradius <- asks (neighborRadius . routingType)
-  mapM_ (findNeighborhoodChannels nradius) nodeList
-  nbeacons <- asks (numBeacons . routingType)
-  mapM_ (setBeacons nbeacons) nodeList
+  populateRoutingTables
 
 main :: IO ()
 main = do
