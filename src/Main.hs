@@ -204,6 +204,7 @@ insertPathIntoGraph g path = GIG.insEdges es g
   where
     es = map (\e -> GIG.toLEdge e ()) $ zip path (tail path)
 
+
 recurSetBeacons :: NumBeacons -> GIG.Node -> BeaconCandidateInfoList -> ProcessedNodes -> ResponsiveNodeInfoList -> Event ()
 recurSetBeacons nb src [] _ rnInfoList = do
   g <- gets networkGraph
@@ -212,7 +213,12 @@ recurSetBeacons nb src [] _ rnInfoList = do
       srcNbhoodGraph = routingTable nstate
       closestResponsiveNodeInfoList = take nb $ sortOn (\( _, addr, _) -> addr) rnInfoList
       pathsToResponsiveNodes = map (\(_, _, p) -> p) closestResponsiveNodeInfoList
-      srcNbhoodGraph' = GIB.undir $ foldl insertPathIntoGraph srcNbhoodGraph pathsToResponsiveNodes
+      nodeList = GIG.labNodes g
+      srcNodeList = GIG.labNodes srcNbhoodGraph
+      labelledNodeList = map (map (\t -> nodeList !! t)) pathsToResponsiveNodes
+      filteredNodeList = filter(`notElem` srcNodeList) (concat labelledNodeList)
+      srcNbhoodGraph1 = GIB.undir $ GIG.insNodes filteredNodeList srcNbhoodGraph 
+      srcNbhoodGraph' = GIB.undir $ foldl insertPathIntoGraph srcNbhoodGraph1 pathsToResponsiveNodes
       nstate' = nstate { routingTable = srcNbhoodGraph' }
   modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate' nstatemap }
 
@@ -282,7 +288,7 @@ main :: IO ()
 main = do
   -- Watts-Strogatz graph generation parameters
   let gtype = WattsStrogatzGraph {
-        graphOrder = 100,
+        graphOrder = 2000,
         numRingNeighbors = 4,
         rewiringProbability = 0.3
       }
@@ -290,7 +296,7 @@ main = do
       -- Flare routing parameters
       rtype = FlareRouting {
         neighborRadius = 2,
-        numBeacons = 2,
+        numBeacons = 6,
         numCandidateRoutes = 10,
         numQueriedNodes = 10
       }
