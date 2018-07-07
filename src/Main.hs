@@ -28,6 +28,7 @@ import           Data.Foldable (minimumBy)
 import           Data.Ord (comparing)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
+import           Text.Printf (printf)
 
 type GraphOrder = Int
 type NumRingNeighbors = Int
@@ -61,12 +62,14 @@ data LNetworkConfig = LNetworkConfig {
 data LNetworkStatistics = LNetworkStatistics {
   numHelloMessages    :: Int,
   numBeaconRequests   :: Int,
-  reachableNodeCounts :: [Int]
+  numTableRequests    :: Int,
+  reachableNodeCounts :: [[Int]]
 } deriving (Show)
 
 initialStats = LNetworkStatistics {
   numHelloMessages = 0,
   numBeaconRequests = 0,
+  numTableRequests = 0,
   reachableNodeCounts = []
 }
 
@@ -75,12 +78,13 @@ instance Monoid LNetworkStatistics where
   s1 `mappend` s2 = LNetworkStatistics {
     numHelloMessages = numHelloMessages s1 + numHelloMessages s2,
     numBeaconRequests = numBeaconRequests s1 + numBeaconRequests s2,
+    numTableRequests = numTableRequests s1 + numTableRequests s2,
     reachableNodeCounts = reachableNodeCounts s1 ++ reachableNodeCounts s2
   }
 
 oneHelloMessageSent = initialStats { numHelloMessages = 1 }
 oneBeaconRequestSent = initialStats { numBeaconRequests = 1 }
-newReachableNodeCount x = initialStats { reachableNodeCounts = [x] }
+oneTableRequestSent = initialStats { numTableRequests = 1 }
 
 type Channel = GIG.Edge -- A channel is a ordered pair of vertices
 type Satoshi = Int
@@ -267,15 +271,42 @@ populateRoutingTables = do
 
     _ -> error "Unsupported routing algorithm"
 
+type NumTableRequests = Maybe Int
+
+isReachable :: GIG.Node -> GIG.Node -> Event NumTableRequests
+isReachable src dst = do
+  nstatemap <- gets nodeStateMap
+  let srcNodeState = nstatemap ! src
+      srcNbhoodGraph = routingTable srcNodeState
+  case GIG.gelem dst srcNbhoodGraph of
+    True -> return (Just 0)
+    False -> do
+      tell oneTableRequestSent
+      let dstNodeState = nstatemap ! dst
+          dstNbhoodGraph = routingTable dstNodeState
+          dstNodeList = GIG.nodes dstNbhoodGraph
+      case any (\x -> GIG.gelem x srcNbhoodGraph) dstNodeList of
+        True -> return (Just 1)
+        False -> return Nothing -- TODO: Write code for further table requests
+
+findReachableNodeCounts :: GIG.Node -> Event ()
+findReachableNodeCounts src = do
+  nstatemap <- gets nodeStateMap
+  nodeList <- gets (GIG.nodes . networkGraph)
+  let nodeListWithoutSrc = delete src nodeList
+  numTableReqList <- mapM (isReachable src) nodeListWithoutSrc
+  let c0 = length $ filter ((==) (Just 0)) numTableReqList
+      c1 = length $ filter ((==) (Just 1)) numTableReqList
+  tell initialStats { reachableNodeCounts = [[c0, c1]] }
+
 reachabilityExperiment :: Int -> Event ()
 reachabilityExperiment numIterations = do
   gen <- gets randomNumGen
-  numNodes <- asks $ graphOrder . graphType
-  sourceNodes <- liftIO $ mapM (\_ -> MWC.uniformR (0, numNodes-1) gen) [1..numIterations]
-  nstatemap <- gets nodeStateMap
-  let sourceNodeRoutingGraphs = map (routingTable . (nstatemap ! )) sourceNodes
-      counts = map (\x -> (GIG.order x) - 1) sourceNodeRoutingGraphs
-  tell initialStats { reachableNodeCounts = counts }
+  nodeList <- gets (GIG.nodes . networkGraph)
+  let numNodes = length nodeList
+  sourceIndices <- liftIO $ mapM (\_ -> MWC.uniformR (0, numNodes-1) gen) [1..numIterations]
+  let sourceNodes = map (nodeList !!) sourceIndices
+  mapM_ findReachableNodeCounts sourceNodes
 
 lightningSim :: Int -> Event ()
 lightningSim numIterations = do
@@ -284,6 +315,9 @@ lightningSim numIterations = do
   initializeChannelCapacities oneBTC
   populateRoutingTables
   reachabilityExperiment numIterations
+
+meanOfInts :: [Int] -> Double
+meanOfInts xs = (fromIntegral $ sum xs)/(fromIntegral $ length xs)
 
 main :: IO ()
 main = do
@@ -329,5 +363,12 @@ main = do
 
   let numiter = 10
   (finalState, stats) <- execRWST (lightningSim numiter) lnconfig initialLNState
-  let avg = (fromIntegral $ sum (reachableNodeCounts stats))/(fromIntegral numiter)
-  putStrLn $ show avg
+  let numNodes = GIG.noNodes . networkGraph $ finalState
+      rcounts = reachableNodeCounts stats
+      rcount0 = map head rcounts
+      pct0 = (meanOfInts rcount0)*100/(fromIntegral (numNodes-1))
+      rcount1 = map last rcounts
+      pct1 = (meanOfInts rcount1)*100/(fromIntegral (numNodes-1))
+      showPct :: Double -> String
+      showPct p = printf "%.2f" p ++ "%"
+  putStrLn $ "[" ++ showPct pct0 ++ ", " ++ showPct pct1 ++ "] Total = " ++ showPct (pct0+pct1)
