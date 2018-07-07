@@ -288,9 +288,9 @@ lightningSim numIterations = do
 main :: IO ()
 main = do
   cmdargs <- getArgs
-  if length cmdargs < 2
+  if length cmdargs < 3
   then do
-    putStrLn "Requires two arguments: graphOrder and numBeacons"
+    putStrLn "Requires three arguments: graphOrder, numBeacons, seedForRNG"
     exitFailure
   else return ()
 
@@ -317,7 +317,7 @@ main = do
 
       -- Changing this seed will result in different realizations
       -- of the simulation
-      seedForRNG = 212
+      seedForRNG = read (cmdargs !! 2)
 
   gen <- MWC.initialize (DV.singleton seedForRNG)
   let initialLNState = LNetworkState {
@@ -331,4 +331,3 @@ main = do
   (finalState, stats) <- execRWST (lightningSim numiter) lnconfig initialLNState
   let avg = (fromIntegral $ sum (reachableNodeCounts stats))/(fromIntegral numiter)
   putStrLn $ show avg
-  putStrLn "Done"
