@@ -8,7 +8,7 @@ import           Control.Monad (replicateM)
 import qualified Data.Vector.Unboxed as DV
 import qualified Data.Map.Strict as Map
 import           Data.Word (Word32, Word64)
-import           Data.List (length, delete)
+import           Data.List (length, delete, nub)
 import           Data.Tuple (swap)
 import           Data.Bits (xor)
 import qualified Data.Graph.Generators as GG
@@ -213,13 +213,12 @@ recurSetBeacons nb src [] _ rnInfoList = do
       srcNbhoodGraph = routingTable nstate
       closestResponsiveNodeInfoList = take nb $ sortOn (\( _, addr, _) -> addr) rnInfoList
       pathsToResponsiveNodes = map (\(_, _, p) -> p) closestResponsiveNodeInfoList
-      nodeList = GIG.labNodes g
-      srcNodeList = GIG.labNodes srcNbhoodGraph
-      labelledNodeList = map (map (\t -> nodeList !! t)) pathsToResponsiveNodes
-      filteredNodeList = filter(`notElem` srcNodeList) (concat labelledNodeList)
-      srcNbhoodGraph1 = GIB.undir $ GIG.insNodes filteredNodeList srcNbhoodGraph 
-      srcNbhoodGraph' = GIB.undir $ foldl insertPathIntoGraph srcNbhoodGraph1 pathsToResponsiveNodes
-      nstate' = nstate { routingTable = srcNbhoodGraph' }
+      srcNodeList = GIG.nodes srcNbhoodGraph
+      filteredNodeList = filter (`notElem` srcNodeList) (nub $ concat pathsToResponsiveNodes)
+      labelledFilteredNodeList = map (\x -> (x, nodeAddress g x)) filteredNodeList
+      srcNbhoodGraph' = GIG.insNodes labelledFilteredNodeList srcNbhoodGraph
+      srcNbhoodGraph'' = GIB.undir $ foldl insertPathIntoGraph srcNbhoodGraph' pathsToResponsiveNodes
+      nstate' = nstate { routingTable = srcNbhoodGraph'' }
   modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate' nstatemap }
 
 recurSetBeacons nb src beaconCandidateInfoList pnList rnInfoList = do
