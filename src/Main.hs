@@ -26,6 +26,8 @@ import           Data.Sort (sortOn)
 import qualified Data.Set as Set
 import           Data.Foldable (minimumBy)
 import           Data.Ord (comparing)
+import           System.Environment (getArgs)
+import           System.Exit (exitFailure)
 
 type GraphOrder = Int
 type NumRingNeighbors = Int
@@ -285,17 +287,24 @@ lightningSim numIterations = do
 
 main :: IO ()
 main = do
+  cmdargs <- getArgs
+  if length cmdargs < 2
+  then do
+    putStrLn "Requires two arguments: graphOrder and numBeacons"
+    exitFailure
+  else return ()
+
   -- Watts-Strogatz graph generation parameters
   let gtype = WattsStrogatzGraph {
-        graphOrder = 2000,
-        numRingNeighbors = 4,
+        graphOrder = read (cmdargs !! 0),
+        numRingNeighbors = 2,
         rewiringProbability = 0.3
       }
 
       -- Flare routing parameters
       rtype = FlareRouting {
         neighborRadius = 2,
-        numBeacons = 6,
+        numBeacons = read (cmdargs !! 1),
         numCandidateRoutes = 10,
         numQueriedNodes = 10
       }
