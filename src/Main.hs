@@ -188,8 +188,8 @@ type PathsToBeacons = [GIG.Path]
 nodeAddress :: Gr NodeAddress () -> GIG.Node -> NodeAddress
 nodeAddress g n = fromJust $ GIG.lab g n
 
-sendBeaconRequest :: GIG.Node -> GIG.Node -> Event (Maybe BeaconCandidateInfoList)
-sendBeaconRequest src dst = do
+sendBeaconRequest :: GIG.Node -> GIG.Path -> GIG.Node -> Event (Maybe BeaconCandidateInfoList)
+sendBeaconRequest src pathToDst dst = do
   tell oneBeaconRequestSent
   nstatemap <- gets nodeStateMap
   case (responsive $ nstatemap ! dst) of
@@ -197,13 +197,16 @@ sendBeaconRequest src dst = do
     True -> do
       g <- gets networkGraph
       let dstNbhoodGraph = routingTable (nstatemap ! dst)
-          dstNbhoodNodes = delete dst $ GIG.nodes dstNbhoodGraph
+          dstNbhoodNodes = delete src $ delete dst $ GIG.nodes dstNbhoodGraph
           dstAddress = nodeAddress g dst
           srcAddress = nodeAddress g src
           newBeaconCandidates = filter (\x -> (dist srcAddress $ nodeAddress g x) < (dist srcAddress dstAddress)) dstNbhoodNodes
           newBeaconAddressDistances = map (dist srcAddress . nodeAddress g) newBeaconCandidates
           pathsToBeaconCandidates = map (\b -> BFS.esp dst b dstNbhoodGraph) newBeaconCandidates
-      return $ Just (zip3 newBeaconCandidates newBeaconAddressDistances pathsToBeaconCandidates)
+          addPathToDst :: GIG.Path -> GIG.Path
+          addPathToDst pathToBeaconCandidate = delete dst $ pathToDst ++ pathToBeaconCandidate
+          pathsToBeaconCandidates' = map (addPathToDst) pathsToBeaconCandidates
+      return $ Just (zip3 newBeaconCandidates newBeaconAddressDistances pathsToBeaconCandidates')
 
 insertPathIntoGraph :: Gr NodeAddress () -> GIG.Path -> Gr NodeAddress ()
 insertPathIntoGraph g path = GIG.insEdges es g
@@ -228,10 +231,10 @@ recurSetBeacons nb src [] _ rnInfoList = do
   modify $ \lnst -> lnst { nodeStateMap = IntMap.insert src nstate' nstatemap }
 
 recurSetBeacons nb src beaconCandidateInfoList pnList rnInfoList = do
-  let beaconCandidateInfo@(beaconCandidateId, _, _) = minimumBy (comparing (\(_, addr, _) -> addr)) beaconCandidateInfoList
+  let beaconCandidateInfo@(beaconCandidateId, _, pathToBeacon) = minimumBy (comparing (\(_, addr, _) -> addr)) beaconCandidateInfoList
       newPNList = beaconCandidateId:pnList
       beaconCandidatesRemaining = delete beaconCandidateInfo beaconCandidateInfoList
-  beaconReqResponse <- sendBeaconRequest src beaconCandidateId
+  beaconReqResponse <- sendBeaconRequest src pathToBeacon beaconCandidateId
   case beaconReqResponse of
     Nothing -> recurSetBeacons nb src beaconCandidatesRemaining newPNList rnInfoList
     Just newBeaconInfoList -> do
@@ -247,7 +250,7 @@ setBeacons nb src = do
   g <- gets networkGraph
   nstatemap <- gets nodeStateMap
   let srcNbhoodGraph = routingTable (nstatemap ! src)
-      srcNbhoodNodes = GIG.nodes srcNbhoodGraph
+      srcNbhoodNodes = delete src $ GIG.nodes srcNbhoodGraph
       nbhoodAddresses = map (nodeAddress g) srcNbhoodNodes
       sourceAddress = nodeAddress g src
       nbhoodAddressDistances = map (dist sourceAddress) nbhoodAddresses
