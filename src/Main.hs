@@ -256,7 +256,8 @@ setBeacons nb src = do
       nbhoodAddressDistances = map (dist sourceAddress) nbhoodAddresses
       nbhoodPaths = map (\b -> BFS.esp src b srcNbhoodGraph) srcNbhoodNodes
       beaconCandidateInfoList = zip3 srcNbhoodNodes nbhoodAddressDistances nbhoodPaths
-  recurSetBeacons nb src beaconCandidateInfoList [] []
+      beaconCandidateInfoList' = take nb $ sortOn (\(_, dist, _) -> dist) beaconCandidateInfoList
+  recurSetBeacons nb src beaconCandidateInfoList' [] []
 
 populateRoutingTables :: Event ()
 populateRoutingTables = do
