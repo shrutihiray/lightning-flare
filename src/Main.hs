@@ -184,6 +184,7 @@ type ProcessedNodes = [GIG.Node]
 type ResponsiveNodeInfoList = BeaconCandidateInfoList
 type Beacons = [GIG.Node]
 type PathsToBeacons = [GIG.Path]
+type QueryNodeList = [(NodeAddress,GIG.Node)]
 
 nodeAddress :: Gr NodeAddress () -> GIG.Node -> NodeAddress
 nodeAddress g n = fromJust $ GIG.lab g n
@@ -291,7 +292,42 @@ isReachable src dst = do
           dstNodeList = GIG.nodes dstNbhoodGraph
       case any (\x -> GIG.gelem x srcNbhoodGraph) dstNodeList of
         True -> return (Just 1)
-        False -> return Nothing -- TODO: Write code for further table requests
+        False -> do
+          let srcNodeList = GIG.nodes srcNbhoodGraph
+              srcNbhoodNodes = delete src srcNodeList
+              dstAddress = nodeAddress dstNbhoodGraph dst
+              srcNbhoodNodesDistances = map (dist dstAddress . nodeAddress srcNbhoodGraph) srcNbhoodNodes
+              queryCandidateList = zip srcNbhoodNodesDistances srcNbhoodNodes
+          rtype <- asks routingType
+          case rtype of
+            FlareRouting {
+              numQueriedNodes = nqueriedNodes
+            } -> do
+              nqueriedNodes <- asks (numQueriedNodes . routingType)
+              recurIsReachable (nqueriedNodes-1) queryCandidateList src dst []
+            _ -> error "Unsupported routing algorithm"
+             
+recurIsReachable :: NumQueriedNodes -> QueryNodeList -> GIG.Node -> GIG.Node -> ProcessedNodes -> Event NumTableRequests
+recurIsReachable 0 _ _ _ _ = return Nothing
+recurIsReachable  nqueriedNodes queryCandidateList src dst pnList = do
+  tell oneTableRequestSent
+  nstatemap <- gets nodeStateMap
+  let queryCandidate@(_, queriedNode) = minimumBy (comparing (\(dist, _) -> dist)) queryCandidateList
+      qnState = nstatemap ! queriedNode
+      qnNbhoodGraph = routingTable qnState
+      dstNodeState = nstatemap ! dst
+      dstNbhoodGraph = routingTable dstNodeState
+      dstNodeList = GIG.nodes dstNbhoodGraph
+      newPNList = pnList ++ [queriedNode]
+  case any (\x -> GIG.gelem x qnNbhoodGraph) dstNodeList of
+    True -> return (Just 2)
+    False -> do
+      let qnNbhoodList = delete queriedNode $ GIG.nodes qnNbhoodGraph
+          filteredQNNbhoodList = filter (`notElem` newPNList) (qnNbhoodList)
+          dstAddress = nodeAddress dstNbhoodGraph dst
+          qnNbhoodNodesDistances = map (dist dstAddress . nodeAddress qnNbhoodGraph) filteredQNNbhoodList
+          newQueryCandidateList = delete queryCandidate $ nub $ queryCandidateList ++ (zip qnNbhoodNodesDistances filteredQNNbhoodList)
+      recurIsReachable (nqueriedNodes-1) newQueryCandidateList src dst newPNList      
 
 findReachableNodeCounts :: GIG.Node -> Event ()
 findReachableNodeCounts src = do
@@ -301,7 +337,8 @@ findReachableNodeCounts src = do
   numTableReqList <- mapM (isReachable src) nodeListWithoutSrc
   let c0 = length $ filter ((==) (Just 0)) numTableReqList
       c1 = length $ filter ((==) (Just 1)) numTableReqList
-  tell initialStats { reachableNodeCounts = [[c0, c1]] }
+      c2 = length $ filter ((==) (Just 2)) numTableReqList
+  tell initialStats { reachableNodeCounts = [[c0, c1, c2]] }
 
 reachabilityExperiment :: Int -> Event ()
 reachabilityExperiment numIterations = do
@@ -371,8 +408,10 @@ main = do
       rcounts = reachableNodeCounts stats
       rcount0 = map head rcounts
       pct0 = (meanOfInts rcount0)*100/(fromIntegral (numNodes-1))
-      rcount1 = map last rcounts
-      pct1 = (meanOfInts rcount1)*100/(fromIntegral (numNodes-1))
+      rcount1 = map head $ map tail rcounts
+      pct1 = (meanOfInts rcount1)*100/(fromIntegral (numNodes-1))      
+      rcount2 = map last rcounts
+      pct2 = (meanOfInts rcount2)*100/(fromIntegral (numNodes-1))
       showPct :: Double -> String
       showPct p = printf "%.2f" p ++ "%"
-  putStrLn $ "[" ++ showPct pct0 ++ ", " ++ showPct pct1 ++ "] Total = " ++ showPct (pct0+pct1)
+  putStrLn $ "[" ++ showPct pct0 ++ ", " ++ showPct pct1 ++ ", " ++ showPct pct2 ++ "] Total = " ++ showPct (pct0+pct1+pct2)
