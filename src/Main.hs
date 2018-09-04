@@ -372,7 +372,7 @@ main = do
   -- Watts-Strogatz graph generation parameters
   let gtype = WattsStrogatzGraph {
         graphOrder = read (cmdargs !! 0),
-        numRingNeighbors = 2,
+        numRingNeighbors = 4,
         rewiringProbability = 0.3
       }
 
@@ -402,7 +402,7 @@ main = do
     randomNumGen = gen
   }
 
-  let numiter = 10
+  let numiter = 100
   (finalState, stats) <- execRWST (lightningSim numiter) lnconfig initialLNState
   let numNodes = GIG.noNodes . networkGraph $ finalState
       rcounts = reachableNodeCounts stats
