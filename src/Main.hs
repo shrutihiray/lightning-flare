@@ -414,4 +414,4 @@ main = do
       pct2 = (meanOfInts rcount2)*100/(fromIntegral (numNodes-1))
       showPct :: Double -> String
       showPct p = printf "%.2f" p ++ "%"
-  putStrLn $ "[" ++ showPct pct0 ++ ", " ++ showPct pct1 ++ ", " ++ showPct pct2 ++ "] Total = " ++ showPct (pct0+pct1+pct2)
+  putStrLn $ "Reachability for [numQueriedNodes = 0 is " ++ showPct pct0 ++ ", numQueriedNodes = 1 is " ++ showPct pct1 ++ ", numQueriedNodes > 1 is " ++ showPct pct2 ++ "] Total reachability = " ++ showPct (pct0+pct1+pct2)
